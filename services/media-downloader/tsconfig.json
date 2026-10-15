@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    /*
+     * CommonJS output, not ESM. This service shares the downloader's pure
+     * modules from `lib/`, which use extensionless relative imports (the same
+     * style the Next.js app resolves). ESM would require `.js` extensions on
+     * every one of those shared imports just to satisfy Node's ESM loader.
+     * A private sidecar gains nothing from ESM, so we compile to CJS and keep
+     * the shared modules identical on both sides.
+     */
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /*
+     * `rootDir` is the repo root because this service imports the downloader's
+     * pure modules directly from `lib/`. Output therefore lands at
+     * dist/services/media-downloader/src/index.js, which is the package main.
+     */
+    "rootDir": "../..",
+    "outDir": "dist"
+  },
+  "include": [
+    "src/**/*.ts",
+    "../../lib/toolkit/media-downloader/limits.ts",
+    "../../lib/toolkit/media-downloader/types.ts",
+    "../../lib/toolkit/media-downloader/format-map.ts",
+    "../../lib/toolkit/media-downloader/format.ts",
+    "../../lib/toolkit/media-downloader/errors.ts",
+    "../../lib/toolkit/media-downloader/session-token.ts",
+    "../../lib/toolkit/media-downloader/url-guard.ts"
+  ]
+}

@@ -1,0 +1,5 @@
+node_modules
+dist
+services/media-downloader/node_modules
+services/media-downloader/dist
+.git

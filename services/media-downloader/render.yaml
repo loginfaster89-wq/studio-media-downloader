@@ -1,0 +1,37 @@
+# Render blueprint for the yt-dlp sidecar.
+#
+# Render is the default because Studio Print's existing backend already runs
+# there (passportprint-studio.onrender.com). Fly.io / Railway / any VPS work
+# identically — the Dockerfile is the only contract.
+#
+# Set MEDIA_DOWNLOADER_SECRET to the same value as the Next.js worker's
+# MEDIA_DOWNLOADER_SECRET. They must match or every request will 401.
+
+services:
+  - type: web
+    name: studio-print-media-downloader
+    runtime: docker
+    dockerfilePath: ./services/media-downloader/Dockerfile
+    dockerContext: .
+    plan: starter # needs >= 1 GB RAM and a writable /tmp for 1 GB downloads
+    # `/livez` is unauthenticated because the platform probe is a plain GET
+    # and cannot send our secret header. Pointing this at `/health` returned
+    # 401 to every probe and triggered a restart loop.
+    healthCheckPath: /livez
+    # yt-dlp downloads are the long pole; keep the request open long enough.
+    autoDeploy: true
+    envVars:
+      - key: MEDIA_DOWNLOADER_SECRET
+        sync: false # set in the Render dashboard
+      - key: MEDIA_DOWNLOADER_ORIGINS
+        value: https://studioprint.in
+      - key: MEDIA_DOWNLOADER_WORKDIR
+        value: /tmp/studio-print-downloads
+      - key: MEDIA_DOWNLOADER_MAX_JOBS
+        value: "3"
+      - key: MEDIA_DOWNLOADER_JOB_TIMEOUT_MS
+        value: "1200000"
+      # Optional: Netscape-format cookie jar, mounted as a secret file. Needed
+      # for some Instagram/TikTok/X posts.
+      - key: MEDIA_DOWNLOADER_COOKIES
+        sync: false

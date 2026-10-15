@@ -1,0 +1,21 @@
+{
+  "name": "@studio-print/media-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "yt-dlp sidecar for the Studio Print video downloader. Talks to yt-dlp and serves signed download sessions.",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/services/media-downloader/src/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/services/media-downloader/src/index.js",
+    "dev": "npm run build && npm start",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  }
+}
