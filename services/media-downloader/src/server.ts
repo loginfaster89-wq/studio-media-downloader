@@ -429,7 +429,13 @@ async function handleStart(
       totalBytes: null,
       speedBytesPerSec: null,
       etaSeconds: null,
-      error: { code: mapped.code, message: mapped.message },
+      /*
+       * Carry the hint through. It is the only place the specific reason is
+       * spelled out ("we do not remove DRM", "try again in a minute"), and
+       * dropping it left the client to invent generic advice that was wrong
+       * for every refusal no other quality could fix.
+       */
+      error: { code: mapped.code, message: mapped.message, hint: mapped.hint },
     });
   });
 

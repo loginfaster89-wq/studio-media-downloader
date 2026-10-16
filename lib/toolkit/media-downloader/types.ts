@@ -115,7 +115,17 @@ export type ProgressEvent = {
   readonly totalBytes: number | null;
   readonly speedBytesPerSec: number | null;
   readonly etaSeconds: number | null;
-  readonly error?: { readonly code: DownloaderErrorCode; readonly message: string };
+  /**
+   * `hint` is carried through from the mapper on purpose. Without it the client
+   * had nothing specific to show and fell back to "try a different quality",
+   * which is wrong advice for a refusal that no other quality can fix — a
+   * DRM-protected video, or a platform blocking the server.
+   */
+  readonly error?: {
+    readonly code: DownloaderErrorCode;
+    readonly message: string;
+    readonly hint?: string;
+  };
 };
 
 /** Response for `GET /file` — streamed straight from the sidecar. */
