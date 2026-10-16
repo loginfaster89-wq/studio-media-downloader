@@ -42,9 +42,27 @@ const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360, 240, 144] as const;
 const MP4_VIDEO_EXTS = new Set(["mp4", "m4v"]);
 const WEBM_VIDEO_EXTS = new Set(["webm"]);
 
-/** `none` is yt-dlp's marker for a stream that carries no such codec. */
+/**
+ * A stream is video when it carries a video codec.
+ *
+ * `height` is deliberately NOT required. Instagram and Pinterest return a
+ * single progressive MP4 and frequently omit the dimensions; requiring a height
+ * deleted every one of their formats, so a downloadable reel surfaced to the
+ * user as "requested format is not available".
+ */
 function hasVideo(format: YtDlpFormat): boolean {
-  return Boolean(format.vcodec) && format.vcodec !== "none" && Number(format.height ?? 0) > 0;
+  return Boolean(format.vcodec) && format.vcodec !== "none";
+}
+
+/**
+ * Height when yt-dlp reports one, otherwise 0.
+ *
+ * 0 is a sentinel meaning "source quality, dimensions unknown" — it keeps such
+ * streams out of the numbered rungs and sorts them last.
+ */
+function heightOf(format: YtDlpFormat): number {
+  const height = Number(format.height ?? 0);
+  return Number.isFinite(height) && height > 0 ? height : 0;
 }
 
 function hasAudio(format: YtDlpFormat): boolean {
@@ -91,8 +109,7 @@ function bestVideoPerHeight(
 
   for (const format of formats) {
     if (!hasVideo(format)) continue;
-    const height = Number(format.height);
-    if (!Number.isFinite(height)) continue;
+    const height = heightOf(format);
 
     const bucket = byHeight.get(height) ?? {};
     const ext = format.ext ?? "";
@@ -198,6 +215,34 @@ export function buildQualityOptions(
         kind: "video",
         container: ext as MediaContainer,
         height,
+        bitrateKbps: video.vbr ? Math.round(video.vbr) : video.tbr ? Math.round(video.tbr) : undefined,
+        filesizeBytes: combinedSize,
+        filesizeUnknown: combinedSize === undefined,
+      });
+    }
+  }
+
+  /* ---------- Video with unknown dimensions ----------
+   * Instagram, Pinterest and some direct CDN sources expose exactly one
+   * progressive file and no height. It is still the file the user asked for, so
+   * offer it as "source quality" rather than reporting no formats at all. */
+  const unknown = byHeight.get(0);
+  if (unknown) {
+    for (const container of ["mp4", "webm"] as const) {
+      const video = unknown[container];
+      if (!video?.format_id) continue;
+
+      const videoSize = sizeBytes(video);
+      const combinedSize = videoSize !== undefined && audioSize !== undefined ? videoSize + audioSize : undefined;
+      if (combinedSize !== undefined && combinedSize > maxBytes) continue;
+
+      const ext = container === "mp4" ? "mp4" : "webm";
+      options.push({
+        id: audioId ? `${video.format_id}+${audioId}` : String(video.format_id),
+        label: `Source quality · ${ext.toUpperCase()}`,
+        kind: "video",
+        container: ext as MediaContainer,
+        height: undefined,
         bitrateKbps: video.vbr ? Math.round(video.vbr) : video.tbr ? Math.round(video.tbr) : undefined,
         filesizeBytes: combinedSize,
         filesizeUnknown: combinedSize === undefined,
