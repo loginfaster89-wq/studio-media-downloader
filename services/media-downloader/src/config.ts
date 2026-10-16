@@ -46,6 +46,13 @@ export type Config = {
    * Without this, reacting to that means a code change and a rebuild.
    */
   readonly extractorArgs: string | null;
+  /**
+   * Browser to impersonate for yt-dlp's `--impersonate` flag.
+   *
+   * Empty means off. When set it must be a target curl_cffi actually
+   * ships (chrome, safari, edge, ...) or yt-dlp aborts the whole run.
+   */
+  readonly impersonate: string | null;
   /** Netscape cookie jar for platforms that need it. Optional. */
   readonly cookiesFile: string | null;
   /** Max simultaneous yt-dlp processes. Protects a small container. */
@@ -80,6 +87,7 @@ export function loadConfig(): Config {
     // `RUNTIME[:PATH]`. A bare path is silently ignored by yt-dlp.
     jsRuntime: process.env.MEDIA_DOWNLOADER_JS_RUNTIME?.trim() || null,
     extractorArgs: process.env.MEDIA_DOWNLOADER_YTDLP_EXTRACTOR_ARGS?.trim() || null,
+    impersonate: process.env.MEDIA_DOWNLOADER_YTDLP_IMPERSONATE?.trim() || null,
     cookiesFile: process.env.MEDIA_DOWNLOADER_COOKIES?.trim() || null,
     maxConcurrentJobs: numeric("MEDIA_DOWNLOADER_MAX_JOBS", 3),
     maxTrackedJobs: numeric("MEDIA_DOWNLOADER_MAX_TRACKED_JOBS", 24),

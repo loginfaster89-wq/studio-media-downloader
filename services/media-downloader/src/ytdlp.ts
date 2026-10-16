@@ -68,6 +68,7 @@ function baseArgs(config: Config): string[] {
   if (config.cookiesFile) args.push("--cookies", config.cookiesFile);
   if (config.jsRuntime) args.push("--js-runtimes", config.jsRuntime);
   if (config.extractorArgs) args.push("--extractor-args", config.extractorArgs);
+  if (config.impersonate) args.push("--impersonate", config.impersonate);
 
   return args;
 }

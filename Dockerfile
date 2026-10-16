@@ -42,6 +42,13 @@ RUN curl -fsSL -o /tmp/deno.zip \
 RUN python3 -m pip install --no-cache-dir --break-system-packages yt-dlp-ejs || \
     echo "yt-dlp-ejs unavailable; YouTube may serve reduced formats"
 
+# curl_cffi backs yt-dlp's --impersonate flag. Several sites refuse a plain
+# Python TLS fingerprint outright and return logged-out or empty markup instead
+# of video URLs; presenting a browser-like fingerprint is the only fix short of
+# an authenticated session.
+RUN python3 -m pip install --no-cache-dir --break-system-packages curl_cffi || \
+    echo "curl_cffi unavailable; yt-dlp will refuse --impersonate"
+
 WORKDIR /app
 
 COPY services/media-downloader/package.json services/media-downloader/tsconfig.json ./services/media-downloader/

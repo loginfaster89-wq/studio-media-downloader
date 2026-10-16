@@ -84,3 +84,29 @@ export function createSessionId(): string {
   crypto.getRandomValues(bytes);
   return base64UrlEncode(bytes);
 }
+
+/**
+ * Insert a session action into a signed session URL.
+ *
+ * The signature always rides in the query string, so the action has to be
+ * spliced into the *path*: plain concatenation turns
+ * `.../session/<id>?exp=..&sig=..` + `/start` into a URL whose query ends in
+ * `sig=../start`, leaving the path two segments long and unmatchable.
+ */
+export function sessionActionUrl(sessionUrl: string, action: string): string {
+  const queryAt = sessionUrl.indexOf("?");
+  if (queryAt === -1) return `${sessionUrl}/${action}`;
+  return `${sessionUrl.slice(0, queryAt)}/${action}${sessionUrl.slice(queryAt)}`;
+}
+
+/**
+ * Resolve a URL the sidecar returned against the session's own origin.
+ *
+ * The sidecar answers `/start` with relative child URLs so it never has to know
+ * its public hostname. Used raw, `new URL("/session/<id>/file", pageOrigin)`
+ * resolves against the *page*, not the sidecar — so both the progress stream and
+ * the file request 404 on a cross-origin download.
+ */
+export function absoluteSessionUrl(sessionUrl: string, url: string): string {
+  return new URL(url, sessionUrl).toString();
+}
