@@ -29,6 +29,17 @@ export type YtDlpFormat = {
   abr?: number | null;
   format_note?: string | null;
   protocol?: string;
+  /**
+   * yt-dlp's own normalised container verdict: the container name, or "none"
+   * when the stream carries no video at all.
+   *
+   * Authoritative when present. Facebook reports `ext: "mp4"` with both codecs
+   * null, so codec-only detection misses formats that are plainly video.
+   */
+  video_ext?: string;
+  audio_ext?: string;
+  /** yt-dlp's internal quality rank; higher is better. */
+  quality?: number | null;
 };
 
 export type YtDlpInfo = {
@@ -40,18 +51,28 @@ const MP4_VIDEO_EXTS = new Set(["mp4", "m4v"]);
 const WEBM_VIDEO_EXTS = new Set(["webm"]);
 
 /**
- * A stream is video when it carries a video codec — or when the extractor says
- * it carries no audio at all.
+ * A stream is video when yt-dlp says so, falling back to what the extractor
+ * reported.
  *
  * Neither `vcodec` nor `height` is required. Instagram omits `vcodec` and marks
  * its video-only streams with `acodec: "none"`, which is yt-dlp's own way of
  * saying "this stream has no audio", so reading that as video follows the
  * extractor's meaning rather than guessing at it.
  */
+function isVideoContainer(ext: string | undefined): boolean {
+  return MP4_VIDEO_EXTS.has(ext ?? "") || WEBM_VIDEO_EXTS.has(ext ?? "");
+}
+
 function hasVideo(format: YtDlpFormat): boolean {
+  // yt-dlp's own verdict first: "none" means audio-only, anything else is the
+  // video container. This is the only signal Facebook gives us.
+  if (format.video_ext) return format.video_ext !== "none";
   if (format.vcodec && format.vcodec !== "none") return true;
-  if (format.acodec !== "none") return false;
-  return MP4_VIDEO_EXTS.has(format.ext ?? "") || WEBM_VIDEO_EXTS.has(format.ext ?? "");
+  if (format.acodec === "none") return isVideoContainer(format.ext);
+  // Codecs unknown on both sides. An mp4/webm container is the only evidence
+  // left, and yt-dlp does not put audio-only streams in either.
+  if (!format.vcodec && !format.acodec) return isVideoContainer(format.ext);
+  return false;
 }
 
 /**
@@ -101,6 +122,21 @@ export function pickBestAudio(formats: readonly YtDlpFormat[]): YtDlpFormat | nu
   return candidates.reduce((best, current) => (score(current) > score(best) ? current : best));
 }
 
+/**
+ * Is `candidate` the better stream for its slot?
+ *
+ * Bitrate decides whenever either side reports one. Facebook reports neither
+ * vbr nor tbr and only a `quality` rank (`sd` = -3, `hd` = -2), so without the
+ * second test the first format encountered wins and "Source quality" hands back
+ * the SD file while the HD one sits right there.
+ */
+function isBetterVideo(candidate: YtDlpFormat, incumbent: YtDlpFormat): boolean {
+  const candidateRate = candidate.vbr ?? candidate.tbr ?? 0;
+  const incumbentRate = incumbent.vbr ?? incumbent.tbr ?? 0;
+  if (candidateRate !== incumbentRate) return candidateRate > incumbentRate;
+  return (candidate.quality ?? 0) > (incumbent.quality ?? 0);
+}
+
 /** Group video-only streams by height, keeping the best bitrate per container. */
 function bestVideoPerHeight(
   formats: readonly YtDlpFormat[],
@@ -117,7 +153,7 @@ function bestVideoPerHeight(
     if (!slot) continue;
 
     const incumbent = bucket[slot];
-    if (!incumbent || (format.vbr ?? 0) > (incumbent.vbr ?? 0)) {
+    if (!incumbent || isBetterVideo(format, incumbent)) {
       bucket[slot] = format;
     }
     byHeight.set(height, bucket);
@@ -212,11 +248,16 @@ export function buildQualityOptions(
       if (combinedSize !== undefined && combinedSize > maxBytes) continue;
 
       const ext = container === "mp4" ? "mp4" : "webm";
+      const bitrate = video.vbr ?? video.tbr;
       const label = [
         `${height}p`,
         ext.toUpperCase(),
-        `${Math.round(video.vbr ?? video.tbr ?? 0)} kbps`,
-      ].join(" · ");
+        // Omit the bitrate rather than printing "0 kbps" for a source that
+        // simply does not report one.
+        bitrate ? `${Math.round(bitrate)} kbps` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · ");
 
       options.push({
         id: audioId ? `${video.format_id}+${audioId}` : String(video.format_id),

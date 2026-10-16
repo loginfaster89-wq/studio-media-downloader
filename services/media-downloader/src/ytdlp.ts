@@ -110,6 +110,14 @@ export async function resolveMetadata(config: Config, url: string): Promise<Reso
     "--dump-json",
     "--flat-playlist",
     "--no-playlist",
+    /*
+     * Metadata must not depend on format selection. yt-dlp runs default format
+     * selection even for --dump-json, so a source whose streams are all over the
+     * byte cap, or which its own selector rejects, dies before printing any JSON
+     * — and the user is told the video has no qualities. The menu is built from
+     * the raw `formats` array, which this flag leaves intact.
+     */
+    "--ignore-no-formats-error",
     // `--no-progress` belongs HERE and nowhere else. In yt-dlp it selects
     // QuietMultilinePrinter, whose print_at_line() is a no-op, which silently
     // discards every --progress-template frame. Passing it on the download
