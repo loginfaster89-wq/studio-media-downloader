@@ -12,7 +12,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, constants } from "node:fs";
 import type { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 
@@ -47,6 +47,19 @@ export type ResolveResult =
  * compares without spaces (`duration<?3600&!is_live`); the space-separated
  * form raises a TypeError inside yt-dlp and aborts the download.
  */
+/**
+ * yt-dlp needs the cookie jar open for reading *and* writing: it rewrites the
+ * jar when the process exits, so a read-only file kills the run at close.
+ */
+function canWriteCookieJar(path: string): boolean {
+  try {
+    accessSync(path, constants.R_OK | constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function baseArgs(config: Config): string[] {
   const args = [
     "--no-config",
@@ -67,20 +80,20 @@ function baseArgs(config: Config): string[] {
 
   if (config.ffmpegBin) args.push("--ffmpeg-location", config.ffmpegBin);
   /*
-   * Only pass --cookies when the file is actually readable.
+   * Only pass --cookies when the jar is readable *and* writable.
    *
-   * yt-dlp aborts before it issues a single request if the cookie file is
-   * missing or unreadable, so a stale MEDIA_DOWNLOADER_COOKIES path does not
-   * degrade the platforms that never needed cookies — it takes down every one
-   * of them at once, including the ones that were working seconds earlier.
+   * yt-dlp rewrites the jar on exit, so a read-only file does not merely lose
+   * cookies — it fails the entire run at close time, including platforms that
+   * never needed cookies. An existence check is not enough: the live failure
+   * was a file that existed, read fine, and could not be opened for writing.
    * Cookies are an enhancement here, not a dependency.
    */
   if (config.cookiesFile) {
-    if (existsSync(config.cookiesFile)) {
+    if (canWriteCookieJar(config.cookiesFile)) {
       args.push("--cookies", config.cookiesFile);
     } else {
       console.warn(
-        `[media-downloader] MEDIA_DOWNLOADER_COOKIES points at "${config.cookiesFile}", which is not readable. Continuing without cookies.`,
+        `[media-downloader] Cookie jar "${config.cookiesFile}" is not readable and writable. Continuing without cookies.`,
       );
     }
   }

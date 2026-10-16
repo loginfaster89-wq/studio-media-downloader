@@ -31,6 +31,13 @@ async function main(): Promise<void> {
     `[media-downloader] listening on :${config.port} ` +
       `(jobs ${config.maxConcurrentJobs}, workdir ${config.workDir}, origins ${config.allowedOrigins.join(",")})`,
   );
+  // Reported separately from the listen line because a failed cookie copy
+  // otherwise looks identical to "cookies did not help": both leave the
+  // affected platforms failing, and the difference matters when triaging.
+  console.info(
+    `[media-downloader] cookie jar: ${config.cookiesFile ?? "none"} ` +
+      `(source ${process.env.MEDIA_DOWNLOADER_COOKIES?.trim() || "unset"})`,
+  );
 
   let shuttingDown = false;
   const shutdown = (signal: string): void => {

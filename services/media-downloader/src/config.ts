@@ -3,6 +3,9 @@
  * runs on Render, Fly.io, Railway or a VPS without a rebuild.
  */
 
+import { accessSync, constants, copyFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+
 function required(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`Missing required env var: ${name}`);
@@ -14,6 +17,46 @@ function numeric(name: string, fallback: number): number {
   if (!raw) return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * Point yt-dlp at a *writable* copy of the cookie jar.
+ *
+ * yt-dlp rewrites the jar at the path given to `--cookies` when it exits, so a
+ * read-only mount fails the whole run at close time with
+ * `OSError: [Errno 30] Read-only file system` — after the download already
+ * succeeded. That reads as a total outage rather than a cookie problem, and it
+ * takes down platforms that never needed cookies at all.
+ *
+ * Copying also keeps the mounted secret as the single source of truth while the
+ * container rewrites its own scratch copy freely.
+ *
+ * Returns null rather than any path yt-dlp cannot write, so a bad cookie
+ * configuration degrades to "no cookies" instead of "no service".
+ */
+function materializeCookies(source: string | null, workDir: string): string | null {
+  if (!source) return null;
+
+  try {
+    accessSync(source, constants.R_OK);
+  } catch {
+    console.warn(
+      `[media-downloader] MEDIA_DOWNLOADER_COOKIES "${source}" is not readable. Continuing without cookies.`,
+    );
+    return null;
+  }
+
+  const destination = join(workDir, "cookies.txt");
+  try {
+    mkdirSync(workDir, { recursive: true });
+    copyFileSync(source, destination);
+    return destination;
+  } catch (error) {
+    console.warn(
+      `[media-downloader] Could not copy the cookie jar to "${destination}" (${String(error)}). Continuing without cookies.`,
+    );
+    return null;
+  }
 }
 
 export type Config = {
@@ -77,18 +120,22 @@ export function loadConfig(): Config {
     .map((value) => value.trim().replace(/\/+$/, ""))
     .filter(Boolean);
 
+  const workDir = process.env.MEDIA_DOWNLOADER_WORKDIR?.trim() || "/tmp/studio-print-downloads";
+
   return {
     port: numeric("PORT", 8080),
     secret: required("MEDIA_DOWNLOADER_SECRET"),
     allowedOrigins: origins.length > 0 ? origins : ["http://localhost:3000"],
-    workDir: process.env.MEDIA_DOWNLOADER_WORKDIR?.trim() || "/tmp/studio-print-downloads",
+    workDir,
     ytdlpBin: process.env.MEDIA_DOWNLOADER_YTDLP?.trim() || "yt-dlp",
     ffmpegBin: process.env.MEDIA_DOWNLOADER_FFMPEG?.trim() || "ffmpeg",
     // `RUNTIME[:PATH]`. A bare path is silently ignored by yt-dlp.
     jsRuntime: process.env.MEDIA_DOWNLOADER_JS_RUNTIME?.trim() || null,
     extractorArgs: process.env.MEDIA_DOWNLOADER_YTDLP_EXTRACTOR_ARGS?.trim() || null,
     impersonate: process.env.MEDIA_DOWNLOADER_YTDLP_IMPERSONATE?.trim() || null,
-    cookiesFile: process.env.MEDIA_DOWNLOADER_COOKIES?.trim() || null,
+    // Deliberately not the mounted path: secret-file mounts are read-only and
+    // yt-dlp writes the jar back on exit. See materializeCookies.
+    cookiesFile: materializeCookies(process.env.MEDIA_DOWNLOADER_COOKIES?.trim() || null, workDir),
     maxConcurrentJobs: numeric("MEDIA_DOWNLOADER_MAX_JOBS", 3),
     maxTrackedJobs: numeric("MEDIA_DOWNLOADER_MAX_TRACKED_JOBS", 24),
     maxSessions: numeric("MEDIA_DOWNLOADER_MAX_SESSIONS", 500),
