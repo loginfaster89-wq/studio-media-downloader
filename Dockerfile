@@ -56,7 +56,7 @@ RUN cd services/media-downloader \
 # Scratch space for jobs. Mount a volume here to survive restarts, but note
 # that a clean start is preferable — nothing here should outlive its download.
 ENV MEDIA_DOWNLOADER_WORKDIR=/tmp/studio-print-downloads
-RUN mkdir -p "$MEDIA_DOWNLOADER_WORKDIR"
+RUN mkdir -p "$MEDIA_DOWNLOADER_WORKDIR" && chown node:node "$MEDIA_DOWNLOADER_WORKDIR"
 
 ENV NODE_ENV=production
 ENV PORT=8080
