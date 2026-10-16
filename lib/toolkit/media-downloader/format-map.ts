@@ -36,22 +36,22 @@ export type YtDlpInfo = {
   duration?: number | null;
 };
 
-/** Video rungs we offer, ascending. Anything above 2160 is not useful here. */
-const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360, 240, 144] as const;
-
 const MP4_VIDEO_EXTS = new Set(["mp4", "m4v"]);
 const WEBM_VIDEO_EXTS = new Set(["webm"]);
 
 /**
- * A stream is video when it carries a video codec.
+ * A stream is video when it carries a video codec — or when the extractor says
+ * it carries no audio at all.
  *
- * `height` is deliberately NOT required. Instagram and Pinterest return a
- * single progressive MP4 and frequently omit the dimensions; requiring a height
- * deleted every one of their formats, so a downloadable reel surfaced to the
- * user as "requested format is not available".
+ * Neither `vcodec` nor `height` is required. Instagram omits `vcodec` and marks
+ * its video-only streams with `acodec: "none"`, which is yt-dlp's own way of
+ * saying "this stream has no audio", so reading that as video follows the
+ * extractor's meaning rather than guessing at it.
  */
 function hasVideo(format: YtDlpFormat): boolean {
-  return Boolean(format.vcodec) && format.vcodec !== "none";
+  if (format.vcodec && format.vcodec !== "none") return true;
+  if (format.acodec !== "none") return false;
+  return MP4_VIDEO_EXTS.has(format.ext ?? "") || WEBM_VIDEO_EXTS.has(format.ext ?? "");
 }
 
 /**
@@ -187,7 +187,16 @@ export function buildQualityOptions(
   /* ---------- Video ---------- */
   const byHeight = bestVideoPerHeight(formats);
 
-  for (const height of VIDEO_HEIGHTS) {
+  // One option per height the source actually offers, highest first.
+  //
+  // This used to walk a fixed rung list (2160/1440/1080/720/480/360/240/144),
+  // which silently deleted every source whose ladder was not in it. Pinterest
+  // ships 852/640/424, so a downloadable pin reported no formats at all.
+  const heights = [...byHeight.keys()]
+    .filter((height) => height > 0)
+    .sort((a, b) => b - a);
+
+  for (const height of heights) {
     const bucket = byHeight.get(height);
     if (!bucket) continue;
 
