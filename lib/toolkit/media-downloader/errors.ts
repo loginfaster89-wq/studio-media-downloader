@@ -66,7 +66,7 @@ test: /age[- ]restricted|confirm your age|not be? comfortable for some audiences
     error: {
       code: "needs_auth",
       message: "This platform wants a signed-in session for this link.",
-      hint: "We hold sessions for YouTube, Reddit and Vimeo, so this usually means the post is private or age-gated. TikTok and Tumblr block our server outright.",
+      hint: "We hold sessions for YouTube, Reddit and Vimeo, so this usually means the post is private or age-gated. Tumblr refuses automated fetches entirely.",
     },
   },
   {
