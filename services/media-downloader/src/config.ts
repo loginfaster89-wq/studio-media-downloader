@@ -20,7 +20,7 @@ function numeric(name: string, fallback: number): number {
 }
 
 /**
- * Point yt-dlp at a *writable* copy of the cookie jar.
+ * Point yt-dlp at a *writable* copy of the cookie jar, outside job scratch.
  *
  * yt-dlp rewrites the jar at the path given to `--cookies` when it exits, so a
  * read-only mount fails the whole run at close time with
@@ -28,13 +28,17 @@ function numeric(name: string, fallback: number): number {
  * succeeded. That reads as a total outage rather than a cookie problem, and it
  * takes down platforms that never needed cookies at all.
  *
- * Copying also keeps the mounted secret as the single source of truth while the
- * container rewrites its own scratch copy freely.
+ * The copy must also live OUTSIDE MEDIA_DOWNLOADER_WORKDIR. That path is job
+ * scratch space and JobStore.init() purges every entry in it on boot, so a jar
+ * written there is destroyed milliseconds after creation: the service then runs
+ * cookie-less while its own boot line claims a jar is loaded. Confirmed live.
  *
  * Returns null rather than any path yt-dlp cannot write, so a bad cookie
  * configuration degrades to "no cookies" instead of "no service".
  */
-function materializeCookies(source: string | null, workDir: string): string | null {
+const COOKIE_DIR = process.env.MEDIA_DOWNLOADER_COOKIE_DIR?.trim() || "/tmp/studio-print-cookies";
+
+function materializeCookies(source: string | null): string | null {
   if (!source) return null;
 
   try {
@@ -46,9 +50,9 @@ function materializeCookies(source: string | null, workDir: string): string | nu
     return null;
   }
 
-  const destination = join(workDir, "cookies.txt");
+  const destination = join(COOKIE_DIR, "cookies.txt");
   try {
-    mkdirSync(workDir, { recursive: true });
+    mkdirSync(COOKIE_DIR, { recursive: true });
     copyFileSync(source, destination);
     return destination;
   } catch (error) {
@@ -135,7 +139,7 @@ export function loadConfig(): Config {
     impersonate: process.env.MEDIA_DOWNLOADER_YTDLP_IMPERSONATE?.trim() || null,
     // Deliberately not the mounted path: secret-file mounts are read-only and
     // yt-dlp writes the jar back on exit. See materializeCookies.
-    cookiesFile: materializeCookies(process.env.MEDIA_DOWNLOADER_COOKIES?.trim() || null, workDir),
+    cookiesFile: materializeCookies(process.env.MEDIA_DOWNLOADER_COOKIES?.trim() || null),
     maxConcurrentJobs: numeric("MEDIA_DOWNLOADER_MAX_JOBS", 3),
     maxTrackedJobs: numeric("MEDIA_DOWNLOADER_MAX_TRACKED_JOBS", 24),
     maxSessions: numeric("MEDIA_DOWNLOADER_MAX_SESSIONS", 500),
