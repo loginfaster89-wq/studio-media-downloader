@@ -94,6 +94,8 @@ export type DownloaderErrorCode =
   | "timed_out"
   | "backend_unavailable"
   | "bad_format"
+  /** The platform serves this video as DRM-protected, so we refuse it. */
+  | "drm_protected"
   | "unknown";
 
 /** Failed `/resolve` payload. `hint` is an actionable next step for the user. */

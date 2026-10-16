@@ -120,7 +120,7 @@ export function guardMediaUrl(input: string): UrlGuardResult {
   const raw = input.trim();
 
   if (!raw) {
-    return fail("invalid_url", "Paste a link to continue.", "Supported: YouTube, Instagram, X, TikTok, Facebook, Reddit and more.");
+    return fail("invalid_url", "Paste a link to continue.", "Supported: YouTube, Instagram, Pinterest, Reddit, Vimeo and more.");
   }
   if (raw.length > MAX_URL_LENGTH) {
     return fail("invalid_url", "That link is too long to process.");

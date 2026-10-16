@@ -65,8 +65,8 @@ test: /age[- ]restricted|confirm your age|not be? comfortable for some audiences
     test: /login required|use --cookies|cookies-from-browser|locked behind the login|account.*cookies|login to confirm|sign in to confirm/i,
     error: {
       code: "needs_auth",
-      message: "This platform needs a signed-in session we cannot provide.",
-      hint: "Instagram, TikTok and X often block anonymous downloads. Public videos usually work.",
+      message: "This platform wants a signed-in session for this link.",
+      hint: "We hold sessions for YouTube, Reddit and Vimeo, so this usually means the post is private or age-gated. TikTok and Tumblr block our server outright.",
     },
   },
   {
@@ -83,6 +83,21 @@ test: /age[- ]restricted|confirm your age|not be? comfortable for some audiences
       code: "unsupported_platform",
       message: "We could not read a media file from that link.",
       hint: "Check that it points to a video post, not a profile or a channel page.",
+    },
+  },
+  {
+    /*
+     * Vimeo serves a DRM-protected copy whenever the uploader switches
+     * downloads off, and yt-dlp refuses those by design. The manifest URL
+     * carries /playlist/drm/ but the per-format has_drm flag stays false, so
+     * this refusal is the only reliable signal — it cannot be filtered out of
+     * the quality menu ahead of time, only explained after the fact.
+     */
+    test: /drm protected|protected by drm|drm[- ]protected|remove drm/i,
+    error: {
+      code: "drm_protected",
+      message: "This video is protected by DRM, so it cannot be downloaded.",
+      hint: "That is the uploader's setting rather than a fault here — Vimeo serves a DRM-protected copy when a video has downloads switched off. We do not remove DRM.",
     },
   },
   {
