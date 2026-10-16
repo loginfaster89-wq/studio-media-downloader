@@ -67,6 +67,7 @@ function baseArgs(config: Config): string[] {
   if (config.ffmpegBin) args.push("--ffmpeg-location", config.ffmpegBin);
   if (config.cookiesFile) args.push("--cookies", config.cookiesFile);
   if (config.jsRuntime) args.push("--js-runtimes", config.jsRuntime);
+  if (config.extractorArgs) args.push("--extractor-args", config.extractorArgs);
 
   return args;
 }

@@ -37,6 +37,15 @@ export type Config = {
    * `deno` to take it from PATH.
    */
   readonly jsRuntime: string | null;
+  /**
+   * Extra `--extractor-args` passed straight to yt-dlp, in yt-dlp's own
+   * `site:key=value` syntax.
+   *
+   * A production knob, not a feature: sites retire player clients without
+   * warning and the fix is usually a different `youtube:player_client=...`.
+   * Without this, reacting to that means a code change and a rebuild.
+   */
+  readonly extractorArgs: string | null;
   /** Netscape cookie jar for platforms that need it. Optional. */
   readonly cookiesFile: string | null;
   /** Max simultaneous yt-dlp processes. Protects a small container. */
@@ -70,6 +79,7 @@ export function loadConfig(): Config {
     ffmpegBin: process.env.MEDIA_DOWNLOADER_FFMPEG?.trim() || "ffmpeg",
     // `RUNTIME[:PATH]`. A bare path is silently ignored by yt-dlp.
     jsRuntime: process.env.MEDIA_DOWNLOADER_JS_RUNTIME?.trim() || null,
+    extractorArgs: process.env.MEDIA_DOWNLOADER_YTDLP_EXTRACTOR_ARGS?.trim() || null,
     cookiesFile: process.env.MEDIA_DOWNLOADER_COOKIES?.trim() || null,
     maxConcurrentJobs: numeric("MEDIA_DOWNLOADER_MAX_JOBS", 3),
     maxTrackedJobs: numeric("MEDIA_DOWNLOADER_MAX_TRACKED_JOBS", 24),
