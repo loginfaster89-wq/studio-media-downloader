@@ -16,7 +16,7 @@ export const DOWNLOAD_LIMITS = {
   /** A playlist listing beyond this is refused with guidance. */
   maxPlaylistEntries: 50,
   /** Metadata extraction budget. */
-  resolveTimeoutMs: 25_000,
+  resolveTimeoutMs: 60_000,
   /** How long a finished file is kept before the sweeper deletes it. */
   fileRetentionMs: 10 * 60 * 1000,
   /** How long an idle session survives. */
