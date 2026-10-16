@@ -89,8 +89,10 @@ test: /age[- ]restricted|confirm your age|not be? comfortable for some audiences
     test: /requested format is not available|requested format not available/i,
     error: {
       code: "bad_format",
-      message: "That quality is no longer available for this video.",
-      hint: "Pick another quality and try again.",
+      // Also fires when a post carries no media at all, so the copy must not
+      // send the user off to retry a quality that was never the problem.
+      message: "We could not find a video or audio track to download in that link.",
+      hint: "Photo and text posts have nothing to download. Try a link to a video post.",
     },
   },
   {

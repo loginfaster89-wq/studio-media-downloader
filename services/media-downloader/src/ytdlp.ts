@@ -147,7 +147,7 @@ export async function resolveMetadata(config: Config, url: string): Promise<Reso
 
   const qualities = buildQualityOptions(primary, DOWNLOAD_LIMITS.maxFileBytes);
   if (qualities.length === 0) {
-    return { ok: false, stderr: run.stderr || "ERROR: requested format is not available" };
+    return { ok: false, stderr: run.stderr || `ERROR: requested format is not available${formatCensus(primary)}` };
   }
 
   return { ok: true, meta, qualities };
@@ -166,6 +166,23 @@ type RawInfo = YtDlpInfo & {
   webpage_url?: string;
   _type?: string;
 };
+
+/**
+ * A compact census of the formats yt-dlp actually returned.
+ *
+ * Appended to the "no format" error so the log distinguishes an image-only post
+ * (no codecs at all) from a source we filtered out — the difference between
+ * "there is nothing to download here" and a real defect in the quality picker.
+ */
+function formatCensus(info: RawInfo): string {
+  const formats = info.formats ?? [];
+  if (formats.length === 0) return " (the source reported no formats)";
+  const sample = formats
+    .slice(0, 3)
+    .map((f) => `${f.ext ?? "?"} v=${f.vcodec ?? "?"} a=${f.acodec ?? "?"} h=${f.height ?? "?"}`)
+    .join("; ");
+  return ` (${formats.length} format${formats.length === 1 ? "" : "s"}: ${sample})`;
+}
 
 function isLiveInfo(info: RawInfo): boolean {
   return info.is_live === true || info.live_status === "is_live" || info.live_status === "is_upcoming";
