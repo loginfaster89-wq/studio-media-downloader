@@ -12,6 +12,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 
@@ -65,7 +66,24 @@ function baseArgs(config: Config): string[] {
   ];
 
   if (config.ffmpegBin) args.push("--ffmpeg-location", config.ffmpegBin);
-  if (config.cookiesFile) args.push("--cookies", config.cookiesFile);
+  /*
+   * Only pass --cookies when the file is actually readable.
+   *
+   * yt-dlp aborts before it issues a single request if the cookie file is
+   * missing or unreadable, so a stale MEDIA_DOWNLOADER_COOKIES path does not
+   * degrade the platforms that never needed cookies — it takes down every one
+   * of them at once, including the ones that were working seconds earlier.
+   * Cookies are an enhancement here, not a dependency.
+   */
+  if (config.cookiesFile) {
+    if (existsSync(config.cookiesFile)) {
+      args.push("--cookies", config.cookiesFile);
+    } else {
+      console.warn(
+        `[media-downloader] MEDIA_DOWNLOADER_COOKIES points at "${config.cookiesFile}", which is not readable. Continuing without cookies.`,
+      );
+    }
+  }
   if (config.jsRuntime) args.push("--js-runtimes", config.jsRuntime);
   if (config.extractorArgs) args.push("--extractor-args", config.extractorArgs);
   if (config.impersonate) args.push("--impersonate", config.impersonate);
