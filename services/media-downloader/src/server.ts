@@ -675,6 +675,18 @@ function handleEvents(
 
 /* --------------------------------------------------------------------- file */
 
+/**
+ * How long /file will wait for a job to finish instead of refusing it.
+ *
+ * Below Cloudflare's 100-second limit with room to spare, and far longer than a
+ * merge takes: the longest realistic tail here is ffmpeg remuxing a few hundred
+ * megabytes.
+ */
+const FILE_WAIT_MS = 60_000;
+const FILE_POLL_MS = 250;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function handleFile(
   response: ServerResponse,
   url: URL,
@@ -684,24 +696,58 @@ async function handleFile(
   const requestedJobId = url.searchParams.get("job") ?? "";
   const job = store.getJobForSession(requestedJobId, session.id);
 
-  if (!job || job.status !== "done") {
-    /*
-     * Logged, not returned. A refused /file is indistinguishable to the client
-     * from a job that has not finished yet, and "file is not ready" was being
-     * sent for a job the store still had, sitting finished on disk. Without
-     * this line the only evidence was the browser: /start 200, the stream 200,
-     * the bar at 100, the button on "Downloaded", and a 1x1 iframe full of this
-     * JSON that nobody could see.
-     */
-    console.log("[media-downloader] /file refused", {
+  if (!job) {
+    sendJson(response, 409, { ok: false, message: "file is not ready" });
+    return;
+  }
+
+  /*
+   * Wait for the job rather than refusing it.
+   *
+   * This endpoint used to answer 409 "file is not ready" whenever the job was not
+   * yet marked done, and the browser asked immediately on the progress stream's
+   * terminal event. Those two things do not agree: yt-dlp reports `finished` when
+   * the raw download completes, and for a format that needs audio and video
+   * merged that is *before* ffmpeg has run and before finishJobSuccessfully has
+   * verified the output file. The job was still `running`, so the request the
+   * page had every reason to make was refused — and refused into a 1x1
+   * off-screen iframe, while the page showed the bar at 100 and the button on
+   * "Downloaded". Measured from the service's own log:
+   *
+   *   /file refused { requestedJobId: '23c82601-…', jobFound: true,
+   *                   jobBelongsToSession: true, status: 'running', tracked: 1 }
+   *
+   * and thirty seconds later the same job was finished, still on disk, and
+   * asked for by nobody. The same endpoint answers 200 with 36,455,615 bytes
+   * when the request arrives a moment later, which is why this looked
+   * intermittent and why a fix aimed at the browser found nothing.
+   *
+   * Waiting removes the race for every client, including a Worker bundle already
+   * cached in someone's browser.
+   */
+  const deadline = Date.now() + FILE_WAIT_MS;
+  while (job.status === "running" && Date.now() < deadline) {
+    await sleep(FILE_POLL_MS);
+  }
+
+  if (job.status !== "done") {
+    // Only the failure paths land here: the job errored, or it is still running
+    // after a full minute, which means yt-dlp is wedged.
+    console.log("[media-downloader] /file gave up", {
       sessionId: session.id,
       requestedJobId,
-      jobFound: Boolean(job),
-      jobBelongsToSession: job ? job.sessionId === session.id : null,
-      status: job?.status ?? null,
+      status: job.status,
+      error: job.error?.error?.message ?? null,
       tracked: store.totalJobs(),
       knownJobs: [...store.jobIdsForDiagnostics()],
     });
+    if (job.status === "error") {
+      sendJson(response, 409, {
+        ok: false,
+        message: job.error?.error?.message ?? "The download failed.",
+      });
+      return;
+    }
     sendJson(response, 409, { ok: false, message: "file is not ready" });
     return;
   }
