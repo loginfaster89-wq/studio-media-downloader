@@ -12,6 +12,7 @@
  *   POST /session/:id/start           browser -> begin a download (signed)
  *   GET  /session/:id/events?job=     browser -> SSE progress (signed)
  *   GET  /session/:id/file?job=       browser -> the bytes (signed)
+ *   GET  /session/:id/thumbnail       browser -> the cover image (signed)
  *
  * Security model: `/resolve` and `/health` require the shared secret and are
  * only ever called by the Worker. Session routes require an HMAC signature the
@@ -40,6 +41,26 @@ const MAX_STREAMS_PER_JOB = 4;
 
 /** SSE heartbeat, so proxies do not close an idle stream mid-download. */
 const HEARTBEAT_MS = 15_000;
+
+/**
+ * Cover images are a rounding error next to the media itself, but the CDN is
+ * third-party and a wrong Content-Length must not become an OOM on a 512 MB
+ * container. Read caps in the reader loop, not after buffering.
+ */
+const MAX_THUMBNAIL_BYTES = 12 * 1024 * 1024;
+const THUMBNAIL_TIMEOUT_MS = 12_000;
+
+/**
+ * A browser's own User-Agent for the cover fetch.
+ *
+ * Several platforms hard-reference their own image CDNs: Instagram, Facebook
+ * and TikTok answer a bare server-side GET with 403 while the identical URL
+ * loads in a tab, because the request arrives with no Referer and a client
+ * that is not a browser. yt-dlp does not pass a UA to us here, so we present
+ * the same one the page would.
+ */
+const THUMBNAIL_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -136,6 +157,76 @@ function contentTypeFor(path: string): string {
   }
 }
 
+/* --------------------------------------------------------------- thumbnails */
+
+/**
+ * Extension for a cover image, from the CDN's own Content-Type.
+ *
+ * Not from the URL: image CDNs serve the same path as WebP, AVIF or JPEG
+ * depending on the client's Accept header, so a URL-derived extension mislabels
+ * a real fraction of downloads. `application/octet-stream` is common too, which
+ * is why the fallback is jpg rather than a refusal.
+ */
+function thumbnailExtension(contentType: string): string {
+  const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  switch (type) {
+    case "image/png":
+      return "png";
+    case "image/webp":
+      return "webp";
+    case "image/avif":
+      return "avif";
+    case "image/gif":
+      return "gif";
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    default:
+      return "jpg";
+  }
+}
+
+/** Title -> a filename a phone's Files app and Windows Explorer both accept. */
+function thumbnailFilename(title: string, contentType: string): string {
+  const slug =
+    title
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60)
+      .replace(/-+$/, "") || "video";
+  return `${slug}-thumbnail.${thumbnailExtension(contentType)}`;
+}
+
+/**
+ * Refuse a cover URL that points somewhere only this container can reach.
+ *
+ * The URL comes from yt-dlp's own metadata, never from the request, so this is
+ * defence in depth rather than the primary control — but the sidecar sits on a
+ * public address with no egress filter, and "extractor metadata is trustworthy"
+ * is exactly the assumption that turns a parser bug into an SSRF.
+ */
+function isFetchableImageUrl(raw: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) return false;
+  // A bare IPv4/IPv6 literal is never a CDN we want, and it is the cheapest way
+  // to aim this fetch at an internal address.
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
+  if (host.startsWith("[") || host.includes(":")) return false;
+
+  return true;
+}
+
+
 /* -------------------------------------------------------------------- server */
 
 export function createServerFor(config: Config, store: JobStore, breakers = new PlatformBreakers()): Server {
@@ -225,6 +316,9 @@ async function route(
     }
     if (action === "file" && request.method === "GET") {
       return handleFile(response, url, session, store);
+    }
+    if (action === "thumbnail" && request.method === "GET") {
+      return handleThumbnail(response, session);
     }
   }
 
@@ -624,4 +718,124 @@ async function handleFile(
 
   stream.destroy();
   await store.release(job);
+}
+
+/* --------------------------------------------------------------- thumbnail */
+
+/**
+ * Stream the item's cover image to the browser as a download.
+ *
+ * Why this is proxied instead of linking the CDN URL directly:
+ *
+ *   1. `download` on an `<a>` is ignored cross-origin, so a direct link
+ *      *navigates* to the image — the page is replaced by a picture and the
+ *      pasted link and quality list are gone.
+ *   2. Instagram, Facebook and TikTok pin their CDNs to a browser User-Agent
+ *      and a matching Referer; a request from the user's own page carries the
+ *      wrong Referer and is refused.
+ *   3. Nothing leaves the user's browser towards a third-party host.
+ *
+ * Unlike `/file` this is idempotent: a cover is not user data and is small
+ * enough to serve again, so the session is left intact. Nothing is written to
+ * disk either — the bytes go from the CDN straight to the response.
+ */
+async function handleThumbnail(response: ServerResponse, session: Session): Promise<void> {
+  const raw = session.meta.thumbnailUrl;
+  if (!raw) {
+    sendJson(response, 404, { ok: false, message: "this item has no cover image" });
+    return;
+  }
+
+  if (!isFetchableImageUrl(raw)) {
+    sendJson(response, 502, { ok: false, message: "the cover image URL was refused" });
+    return;
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(raw, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(THUMBNAIL_TIMEOUT_MS),
+      headers: {
+        "User-Agent": THUMBNAIL_UA,
+        // The page the cover belongs to. Omitting it is the usual reason an
+        // otherwise public image answers 403.
+        Referer: session.url,
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+  } catch {
+    sendJson(response, 504, { ok: false, message: "the cover image host did not respond" });
+    return;
+  }
+
+  const upstreamType = (upstream.headers.get("content-type") ?? "").toLowerCase();
+  if (!upstream.ok || !upstreamType.startsWith("image/")) {
+    sendJson(response, 502, {
+      ok: false,
+      message: upstream.ok
+        ? "the cover image host did not return an image"
+        : `the cover image host refused the request (${upstream.status})`,
+    });
+    return;
+  }
+
+  // Declared length is a hint, not a promise: cap it here, then cap again while
+  // reading, because a chunked response declares nothing at all.
+  const declared = Number(upstream.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_THUMBNAIL_BYTES) {
+    sendJson(response, 502, { ok: false, message: "the cover image is too large to serve" });
+    return;
+  }
+
+  const reader = upstream.body?.getReader();
+  if (!reader) {
+    sendJson(response, 502, { ok: false, message: "the cover image host sent no body" });
+    return;
+  }
+
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      size += value.byteLength;
+      if (size > MAX_THUMBNAIL_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        sendJson(response, 502, { ok: false, message: "the cover image is too large to serve" });
+        return;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } catch {
+    // Headers may already be sent by a later path; guard before writing.
+    if (!response.headersSent) {
+      sendJson(response, 504, { ok: false, message: "the cover image download was interrupted" });
+    } else {
+      response.end();
+    }
+    return;
+  }
+
+  if (size === 0) {
+    sendJson(response, 502, { ok: false, message: "the cover image host sent an empty image" });
+    return;
+  }
+
+  const body = Buffer.concat(chunks);
+  response.writeHead(200, {
+    "Content-Type": upstreamType,
+    "Content-Length": body.byteLength,
+    "Content-Disposition": contentDisposition(
+      thumbnailFilename(session.meta.title, upstreamType),
+    ),
+    // Short, because a cover is trivially re-fetchable and a stale one after a
+    // re-upload is a wrong-looking download.
+    "Cache-Control": "public, max-age=300",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(body);
 }
