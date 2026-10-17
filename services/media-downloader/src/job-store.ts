@@ -123,6 +123,17 @@ export class JobStore {
     return this.jobs.get(id) ?? null;
   }
 
+  /**
+   * Job ids the store still holds, for a refused-request log line.
+   *
+   * Not on the hot path and not part of the request contract — the point is that
+   * a "/file refused" line says which ids existed, so a mismatch between the
+   * requested id and reality is readable from the log alone.
+   */
+  jobIdsForDiagnostics(): readonly string[] {
+    return [...this.jobs.keys()];
+  }
+
   getJobForSession(jobId: string, sessionId: string): Job | null {
     const job = this.jobs.get(jobId);
     if (!job || job.sessionId !== sessionId) return null;

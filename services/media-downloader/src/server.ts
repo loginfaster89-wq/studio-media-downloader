@@ -681,9 +681,27 @@ async function handleFile(
   session: Session,
   store: JobStore,
 ): Promise<void> {
-  const job = store.getJobForSession(url.searchParams.get("job") ?? "", session.id);
+  const requestedJobId = url.searchParams.get("job") ?? "";
+  const job = store.getJobForSession(requestedJobId, session.id);
 
   if (!job || job.status !== "done") {
+    /*
+     * Logged, not returned. A refused /file is indistinguishable to the client
+     * from a job that has not finished yet, and "file is not ready" was being
+     * sent for a job the store still had, sitting finished on disk. Without
+     * this line the only evidence was the browser: /start 200, the stream 200,
+     * the bar at 100, the button on "Downloaded", and a 1x1 iframe full of this
+     * JSON that nobody could see.
+     */
+    console.log("[media-downloader] /file refused", {
+      sessionId: session.id,
+      requestedJobId,
+      jobFound: Boolean(job),
+      jobBelongsToSession: job ? job.sessionId === session.id : null,
+      status: job?.status ?? null,
+      tracked: store.totalJobs(),
+      knownJobs: [...store.jobIdsForDiagnostics()],
+    });
     sendJson(response, 409, { ok: false, message: "file is not ready" });
     return;
   }
