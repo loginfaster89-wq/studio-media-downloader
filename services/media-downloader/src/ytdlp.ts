@@ -287,7 +287,8 @@ export type StartDownloadOptions = {
  * Spawn yt-dlp for one download.
  *
  * Flags worth knowing about:
- *   -f <qualityId>          the exact formats the user picked
+ *   -f <formatId>           the exact formats the user picked, with any
+ *                           ":container" suffix stripped first (see below)
  *   -o %(id)s.%(ext)s       NEVER %(title)s — titles contain slashes and emoji
  *   --concurrent-fragments  biggest single speed win for DASH/HLS
  *   --max-filesize          belt-and-braces; unknown-size streams still need
@@ -295,6 +296,26 @@ export type StartDownloadOptions = {
  */
 export function startDownload(config: Config, options: StartDownloadOptions): JobHandle {
   const { url, quality, outDir, onProgress } = options;
+
+  /*
+   * Audio ids arrive as "<format_id>:<container>" — for example "258:m4a".
+   * The suffix exists so the UI can offer M4A or MP3 for one source stream,
+   * and the container is carried separately on quality.container, which the -x
+   * branch below already reads.
+   *
+   * It must NOT be handed to -f. yt-dlp has no container syntax in its format
+   * selector, so the whole string is treated as one unknown format id:
+   *
+   *   -f "258:m4a"   ERROR: Requested format is not available   exit 1
+   *   -f "258"       Downloading 1 format(s): 258                exit 0
+   *
+   * That failure was live on every audio-only download. Measured across seven
+   * platforms: all four that selected an audio row failed with exactly that
+   * error, and all three that selected a video row downloaded fine. Video ids
+   * are "299+258" with no colon, which is why only audio was ever affected —
+   * and why it survived so long unnoticed behind a page that looked healthy.
+   */
+  const formatId = String(quality.id).split(":")[0] ?? String(quality.id);
 
   const args = [
     "--newline",
@@ -312,7 +333,7 @@ export function startDownload(config: Config, options: StartDownloadOptions): Jo
     "mp4",
     ...baseArgs(config),
     "-f",
-    quality.id,
+    formatId,
     "-o",
     `${outDir}/%(id)s.%(ext)s`,
   ];
