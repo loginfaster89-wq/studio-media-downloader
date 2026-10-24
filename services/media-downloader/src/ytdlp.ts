@@ -166,6 +166,7 @@ export async function resolveMetadata(config: Config, url: string): Promise<Reso
     id: primary.id ?? "",
     title: primary.title ?? "Untitled",
     uploader: optionalString(primary.uploader),
+    description: optionalString(primary.description),
     durationSeconds: typeof primary.duration === "number" ? primary.duration : undefined,
     thumbnailUrl: optionalString(primary.thumbnail),
     sourceUrl: optionalString(primary.webpage_url) ?? url,
@@ -198,6 +199,12 @@ type RawInfo = YtDlpInfo & {
   id?: string;
   title?: string;
   uploader?: string;
+  /**
+   * Full description / caption. Carried through to the client so a visitor can
+   * read and copy the original caption next to the video. Absent on sources
+   * that publish none, which is why MediaMeta.description is optional.
+   */
+  description?: string;
   thumbnail?: string;
   extractor_key?: string;
   extractor?: string;

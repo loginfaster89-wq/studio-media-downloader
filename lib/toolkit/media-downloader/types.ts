@@ -37,6 +37,8 @@ export type MediaMeta = {
   readonly id: string;
   readonly title: string;
   readonly uploader?: string;
+  /** Video description / caption from the source — shown under the title so the user can copy it. */
+  readonly description?: string;
   readonly durationSeconds?: number;
   readonly thumbnailUrl?: string;
   readonly sourceUrl: string;
