@@ -296,9 +296,6 @@ async function route(
    * under its own attachment headers.
    */
   if (url.pathname === "/image" && request.method === "GET") {
-    if (!hasSecret(request, config)) {
-      return sendJson(response, 401, { ok: false, message: "unauthorised" });
-    }
     const raw = url.searchParams.get("url");
     let target: URL | null = null;
     try {
@@ -309,7 +306,26 @@ async function route(
     if (!target || target.protocol !== "https:" || !IMAGE_HOSTS.some((rule) => rule.test(target.hostname))) {
       return sendJson(response, 400, { ok: false, message: "that host is not allowed" });
     }
-    await handleImage(target, response);
+
+    /*
+     * Signed, not secret-header: the browser follows a redirect here, and a
+     * browser cannot hold our shared secret. The signature covers the exact
+     * image URL, so the link is useless for anything else and dies in minutes.
+     */
+    const verdict = await verifySession(
+      target.toString(),
+      Number(url.searchParams.get("exp")),
+      url.searchParams.get("sig") ?? "",
+      config.secret,
+    );
+    if (!verdict.ok) {
+      return sendJson(response, verdict.reason === "expired" ? 410 : 403, {
+        ok: false,
+        message: "that image link has expired. Resolve the post again.",
+      });
+    }
+
+    await handleImage(target, url.searchParams.get("n"), response);
     return;
   }
 
@@ -369,7 +385,7 @@ const BROWSER_UA =
  * this file already reads files that way — one code path is easier to reason
  * about than two.
  */
-async function handleImage(target: URL, response: ServerResponse): Promise<void> {
+async function handleImage(target: URL, requestedName: string | null, response: ServerResponse): Promise<void> {
   try {
     const upstream = await fetch(target, {
       redirect: "follow",
@@ -388,11 +404,21 @@ async function handleImage(target: URL, response: ServerResponse): Promise<void>
       sendJson(response, 502, { ok: false, message: "the source did not return an image" });
       return;
     }
+    const ext = type === "image/png" ? "png" : type === "image/webp" ? "webp" : "jpg";
+    const base = (requestedName ?? "instagram-image")
+      .replace(/\.[a-z0-9]+$/i, "")
+      .replace(/[^a-z0-9._-]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80);
     const bytes = Buffer.from(await upstream.arrayBuffer());
     response.writeHead(200, {
       "content-type": type,
       "content-length": String(bytes.length),
+      // The whole point of this hop: the browser saves a file instead of
+      // navigating to the picture.
+      "content-disposition": `attachment; filename="${base || "instagram-image"}.${ext}"`,
       "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
     });
     response.end(bytes);
   } catch (error) {
