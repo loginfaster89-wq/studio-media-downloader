@@ -12,7 +12,6 @@
  *   POST /session/:id/start           browser -> begin a download (signed)
  *   GET  /session/:id/events?job=     browser -> SSE progress (signed)
  *   GET  /session/:id/file?job=       browser -> the bytes (signed)
- *   GET  /session/:id/thumbnail       browser -> the cover image (signed)
  *
  * Security model: `/resolve` and `/health` require the shared secret and are
  * only ever called by the Worker. Session routes require an HMAC signature the
@@ -41,26 +40,6 @@ const MAX_STREAMS_PER_JOB = 4;
 
 /** SSE heartbeat, so proxies do not close an idle stream mid-download. */
 const HEARTBEAT_MS = 15_000;
-
-/**
- * Cover images are a rounding error next to the media itself, but the CDN is
- * third-party and a wrong Content-Length must not become an OOM on a 512 MB
- * container. Read caps in the reader loop, not after buffering.
- */
-const MAX_THUMBNAIL_BYTES = 12 * 1024 * 1024;
-const THUMBNAIL_TIMEOUT_MS = 12_000;
-
-/**
- * A browser's own User-Agent for the cover fetch.
- *
- * Several platforms hard-reference their own image CDNs: Instagram, Facebook
- * and TikTok answer a bare server-side GET with 403 while the identical URL
- * loads in a tab, because the request arrives with no Referer and a client
- * that is not a browser. yt-dlp does not pass a UA to us here, so we present
- * the same one the page would.
- */
-const THUMBNAIL_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -157,76 +136,6 @@ function contentTypeFor(path: string): string {
   }
 }
 
-/* --------------------------------------------------------------- thumbnails */
-
-/**
- * Extension for a cover image, from the CDN's own Content-Type.
- *
- * Not from the URL: image CDNs serve the same path as WebP, AVIF or JPEG
- * depending on the client's Accept header, so a URL-derived extension mislabels
- * a real fraction of downloads. `application/octet-stream` is common too, which
- * is why the fallback is jpg rather than a refusal.
- */
-function thumbnailExtension(contentType: string): string {
-  const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
-  switch (type) {
-    case "image/png":
-      return "png";
-    case "image/webp":
-      return "webp";
-    case "image/avif":
-      return "avif";
-    case "image/gif":
-      return "gif";
-    case "image/jpeg":
-    case "image/jpg":
-      return "jpg";
-    default:
-      return "jpg";
-  }
-}
-
-/** Title -> a filename a phone's Files app and Windows Explorer both accept. */
-function thumbnailFilename(title: string, contentType: string): string {
-  const slug =
-    title
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/[^a-zA-Z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 60)
-      .replace(/-+$/, "") || "video";
-  return `${slug}-thumbnail.${thumbnailExtension(contentType)}`;
-}
-
-/**
- * Refuse a cover URL that points somewhere only this container can reach.
- *
- * The URL comes from yt-dlp's own metadata, never from the request, so this is
- * defence in depth rather than the primary control — but the sidecar sits on a
- * public address with no egress filter, and "extractor metadata is trustworthy"
- * is exactly the assumption that turns a parser bug into an SSRF.
- */
-function isFetchableImageUrl(raw: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
-
-  const host = parsed.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) return false;
-  // A bare IPv4/IPv6 literal is never a CDN we want, and it is the cheapest way
-  // to aim this fetch at an internal address.
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
-  if (host.startsWith("[") || host.includes(":")) return false;
-
-  return true;
-}
-
-
 /* -------------------------------------------------------------------- server */
 
 export function createServerFor(config: Config, store: JobStore, breakers = new PlatformBreakers()): Server {
@@ -287,6 +196,32 @@ async function route(
     return handleResolve(request, response, config, store, breakers);
   }
 
+  /*
+   * Image relay.
+   *
+   * Instagram's CDN answers 403 to Cloudflare's egress ranges, while this service
+   * — which just resolved the post from a normal datacenter IP — is served the
+   * file. So the Worker asks us for the bytes and hands them to the browser
+   * under its own attachment headers.
+   */
+  if (url.pathname === "/image" && request.method === "GET") {
+    if (!hasSecret(request, config)) {
+      return sendJson(response, 401, { ok: false, message: "unauthorised" });
+    }
+    const raw = url.searchParams.get("url");
+    let target: URL | null = null;
+    try {
+      target = raw ? new URL(raw) : null;
+    } catch {
+      target = null;
+    }
+    if (!target || target.protocol !== "https:" || !IMAGE_HOSTS.some((rule) => rule.test(target.hostname))) {
+      return sendJson(response, 400, { ok: false, message: "that host is not allowed" });
+    }
+    await handleImage(target, response);
+    return;
+  }
+
   if (segments[0] === "session" && segments[1] && segments[2]) {
     const sessionId = segments[1];
     const action = segments[2];
@@ -317,15 +252,63 @@ async function route(
     if (action === "file" && request.method === "GET") {
       return handleFile(response, url, session, store);
     }
-    if (action === "thumbnail" && request.method === "GET") {
-      return handleThumbnail(response, session);
-    }
   }
 
   sendJson(response, 404, { ok: false, message: "not found" });
 }
 
 /* ------------------------------------------------------------------ resolve */
+
+/**
+ * Hosts the image relay may fetch. Same list the Worker enforces; kept here too
+ * because this service is directly reachable and must not trust its caller.
+ */
+const IMAGE_HOSTS = [/(^|\.)cdninstagram\.com$/i, /(^|\.)fbcdn\.net$/i];
+
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+/**
+ * Fetch one signed CDN image and stream it back.
+ *
+ * Read fully into a buffer first: these are single photos (tens to a few hundred
+ * KB), and a bounded read is simpler than plumbing a web stream through node's
+ * http response, which is what the rest of this file already does with files.
+ */
+async function handleImage(target: URL, response: ServerResponse): Promise<void> {
+  try {
+    const upstream = await fetch(target, {
+      redirect: "follow",
+      headers: {
+        accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+        "user-agent": BROWSER_UA,
+        referer: "https://www.instagram.com/",
+      },
+    });
+    if (!upstream.ok) {
+      sendJson(response, 502, { ok: false, message: `the source refused the image (${upstream.status})` });
+      return;
+    }
+    const type = ((upstream.headers.get("content-type") ?? "image/jpeg").split(";")[0] ?? "image/jpeg").trim();
+    if (!type.startsWith("image/")) {
+      sendJson(response, 502, { ok: false, message: "the source did not return an image" });
+      return;
+    }
+    const bytes = Buffer.from(await upstream.arrayBuffer());
+    response.writeHead(200, {
+      "content-type": type,
+      "content-length": String(bytes.length),
+      "cache-control": "no-store",
+    });
+    response.end(bytes);
+  } catch (error) {
+    sendJson(response, 502, {
+      ok: false,
+      message: `the image could not be fetched (${String((error as Error)?.message ?? error).slice(0, 60)})`,
+    });
+  }
+}
+
 
 async function handleResolve(
   request: IncomingMessage,
@@ -675,79 +658,15 @@ function handleEvents(
 
 /* --------------------------------------------------------------------- file */
 
-/**
- * How long /file will wait for a job to finish instead of refusing it.
- *
- * Below Cloudflare's 100-second limit with room to spare, and far longer than a
- * merge takes: the longest realistic tail here is ffmpeg remuxing a few hundred
- * megabytes.
- */
-const FILE_WAIT_MS = 60_000;
-const FILE_POLL_MS = 250;
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 async function handleFile(
   response: ServerResponse,
   url: URL,
   session: Session,
   store: JobStore,
 ): Promise<void> {
-  const requestedJobId = url.searchParams.get("job") ?? "";
-  const job = store.getJobForSession(requestedJobId, session.id);
+  const job = store.getJobForSession(url.searchParams.get("job") ?? "", session.id);
 
-  if (!job) {
-    sendJson(response, 409, { ok: false, message: "file is not ready" });
-    return;
-  }
-
-  /*
-   * Wait for the job rather than refusing it.
-   *
-   * This endpoint used to answer 409 "file is not ready" whenever the job was not
-   * yet marked done, and the browser asked immediately on the progress stream's
-   * terminal event. Those two things do not agree: yt-dlp reports `finished` when
-   * the raw download completes, and for a format that needs audio and video
-   * merged that is *before* ffmpeg has run and before finishJobSuccessfully has
-   * verified the output file. The job was still `running`, so the request the
-   * page had every reason to make was refused — and refused into a 1x1
-   * off-screen iframe, while the page showed the bar at 100 and the button on
-   * "Downloaded". Measured from the service's own log:
-   *
-   *   /file refused { requestedJobId: '23c82601-…', jobFound: true,
-   *                   jobBelongsToSession: true, status: 'running', tracked: 1 }
-   *
-   * and thirty seconds later the same job was finished, still on disk, and
-   * asked for by nobody. The same endpoint answers 200 with 36,455,615 bytes
-   * when the request arrives a moment later, which is why this looked
-   * intermittent and why a fix aimed at the browser found nothing.
-   *
-   * Waiting removes the race for every client, including a Worker bundle already
-   * cached in someone's browser.
-   */
-  const deadline = Date.now() + FILE_WAIT_MS;
-  while (job.status === "running" && Date.now() < deadline) {
-    await sleep(FILE_POLL_MS);
-  }
-
-  if (job.status !== "done") {
-    // Only the failure paths land here: the job errored, or it is still running
-    // after a full minute, which means yt-dlp is wedged.
-    console.log("[media-downloader] /file gave up", {
-      sessionId: session.id,
-      requestedJobId,
-      status: job.status,
-      error: job.error?.error?.message ?? null,
-      tracked: store.totalJobs(),
-      knownJobs: [...store.jobIdsForDiagnostics()],
-    });
-    if (job.status === "error") {
-      sendJson(response, 409, {
-        ok: false,
-        message: job.error?.error?.message ?? "The download failed.",
-      });
-      return;
-    }
+  if (!job || job.status !== "done") {
     sendJson(response, 409, { ok: false, message: "file is not ready" });
     return;
   }
@@ -782,124 +701,4 @@ async function handleFile(
 
   stream.destroy();
   await store.release(job);
-}
-
-/* --------------------------------------------------------------- thumbnail */
-
-/**
- * Stream the item's cover image to the browser as a download.
- *
- * Why this is proxied instead of linking the CDN URL directly:
- *
- *   1. `download` on an `<a>` is ignored cross-origin, so a direct link
- *      *navigates* to the image — the page is replaced by a picture and the
- *      pasted link and quality list are gone.
- *   2. Instagram, Facebook and TikTok pin their CDNs to a browser User-Agent
- *      and a matching Referer; a request from the user's own page carries the
- *      wrong Referer and is refused.
- *   3. Nothing leaves the user's browser towards a third-party host.
- *
- * Unlike `/file` this is idempotent: a cover is not user data and is small
- * enough to serve again, so the session is left intact. Nothing is written to
- * disk either — the bytes go from the CDN straight to the response.
- */
-async function handleThumbnail(response: ServerResponse, session: Session): Promise<void> {
-  const raw = session.meta.thumbnailUrl;
-  if (!raw) {
-    sendJson(response, 404, { ok: false, message: "this item has no cover image" });
-    return;
-  }
-
-  if (!isFetchableImageUrl(raw)) {
-    sendJson(response, 502, { ok: false, message: "the cover image URL was refused" });
-    return;
-  }
-
-  let upstream: Response;
-  try {
-    upstream = await fetch(raw, {
-      redirect: "follow",
-      signal: AbortSignal.timeout(THUMBNAIL_TIMEOUT_MS),
-      headers: {
-        "User-Agent": THUMBNAIL_UA,
-        // The page the cover belongs to. Omitting it is the usual reason an
-        // otherwise public image answers 403.
-        Referer: session.url,
-        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-  } catch {
-    sendJson(response, 504, { ok: false, message: "the cover image host did not respond" });
-    return;
-  }
-
-  const upstreamType = (upstream.headers.get("content-type") ?? "").toLowerCase();
-  if (!upstream.ok || !upstreamType.startsWith("image/")) {
-    sendJson(response, 502, {
-      ok: false,
-      message: upstream.ok
-        ? "the cover image host did not return an image"
-        : `the cover image host refused the request (${upstream.status})`,
-    });
-    return;
-  }
-
-  // Declared length is a hint, not a promise: cap it here, then cap again while
-  // reading, because a chunked response declares nothing at all.
-  const declared = Number(upstream.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_THUMBNAIL_BYTES) {
-    sendJson(response, 502, { ok: false, message: "the cover image is too large to serve" });
-    return;
-  }
-
-  const reader = upstream.body?.getReader();
-  if (!reader) {
-    sendJson(response, 502, { ok: false, message: "the cover image host sent no body" });
-    return;
-  }
-
-  const chunks: Buffer[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value || value.byteLength === 0) continue;
-      size += value.byteLength;
-      if (size > MAX_THUMBNAIL_BYTES) {
-        await reader.cancel().catch(() => undefined);
-        sendJson(response, 502, { ok: false, message: "the cover image is too large to serve" });
-        return;
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } catch {
-    // Headers may already be sent by a later path; guard before writing.
-    if (!response.headersSent) {
-      sendJson(response, 504, { ok: false, message: "the cover image download was interrupted" });
-    } else {
-      response.end();
-    }
-    return;
-  }
-
-  if (size === 0) {
-    sendJson(response, 502, { ok: false, message: "the cover image host sent an empty image" });
-    return;
-  }
-
-  const body = Buffer.concat(chunks);
-  response.writeHead(200, {
-    "Content-Type": upstreamType,
-    "Content-Length": body.byteLength,
-    "Content-Disposition": contentDisposition(
-      thumbnailFilename(session.meta.title, upstreamType),
-    ),
-    // Short, because a cover is trivially re-fetchable and a stale one after a
-    // re-upload is a wrong-looking download.
-    "Cache-Control": "public, max-age=300",
-    "X-Content-Type-Options": "nosniff",
-  });
-  response.end(body);
 }
