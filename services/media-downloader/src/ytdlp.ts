@@ -22,7 +22,7 @@ import {
   type YtDlpInfo,
 } from "../../../lib/toolkit/media-downloader/format-map";
 import { safeFilename } from "../../../lib/toolkit/media-downloader/format";
-import type { MediaEntry, MediaMeta, ProgressEvent, QualityOption } from "../../../lib/toolkit/media-downloader/types";
+import type { MediaEntry, MediaImage, MediaMeta, ProgressEvent, QualityOption } from "../../../lib/toolkit/media-downloader/types";
 import type { Config } from "./config";
 
 export type ResolveResult =
@@ -188,10 +188,132 @@ export async function resolveMetadata(config: Config, url: string): Promise<Reso
 
   const qualities = buildQualityOptions(primary, DOWNLOAD_LIMITS.maxFileBytes);
   if (qualities.length === 0) {
+    /*
+     * A carousel (multi-image post) is checked FIRST, before the single-image
+     * fallback. The playlist object itself carries one thumbnail, so handling it
+     * as a single image is exactly the bug this ordering prevents: the visitor
+     * would get slide one of ten and no way to reach the rest.
+     */
+    if (entries.length > 1) {
+      const slides = await resolveSlideImages(config, url);
+      if (slides.length > 1) {
+        return {
+          ok: true,
+          meta: { ...meta, image: slides[0], images: slides },
+          qualities: [],
+        };
+      }
+    }
+
+    /*
+     * Single image post. yt-dlp exits 0 on those and simply reports zero
+     * formats; the image itself is still listed among its thumbnails. Verified
+     * on 28 October 2026: a public photo post returned 0 formats and 13
+     * thumbnails, the largest being the source image.
+     */
+    const image = pickSourceImage(primary);
+    if (image) return { ok: true, meta: { ...meta, image }, qualities: [] };
     return { ok: false, stderr: run.stderr || `ERROR: requested format is not available${formatCensus(primary)}` };
   }
 
   return { ok: true, meta, qualities };
+}
+
+/**
+ * Every photo slide of a carousel, in post order.
+ *
+ * The metadata call runs with `--flat-playlist`, which is right for channels but
+ * strips each carousel entry down to an id — no media URLs at all. So this makes
+ * one more extraction with the playlist expanded, bounded to
+ * `maxCarouselSlides`: a carousel is a handful of pictures, and an unbounded
+ * walk on a hostile source is how a resolve turns into a timeout.
+ *
+ * A video slide inside an album is skipped rather than fatal: the photo slides
+ * around it are what the visitor asked for, and the page states the omission
+ * instead of quietly returning a still from a video.
+ */
+async function resolveSlideImages(config: Config, url: string): Promise<MediaImage[]> {
+  const args = [
+    "--dump-json",
+    "--playlist-end",
+    String(DOWNLOAD_LIMITS.maxCarouselSlides),
+    "--ignore-no-formats-error",
+    "--no-progress",
+    ...baseArgs(config),
+    url,
+  ];
+
+  const run = await execFile(config.ytdlpBin, args, {
+    timeoutMs: DOWNLOAD_LIMITS.resolveTimeoutMs,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (run.code !== 0 || !run.stdout.trim()) return [];
+
+  const slides: MediaImage[] = [];
+  const seen = new Set<string>();
+  for (const line of run.stdout.split("\n")) {
+    if (!line.trim()) continue;
+    let entry: RawInfo;
+    try {
+      entry = JSON.parse(line) as RawInfo;
+    } catch {
+      continue;
+    }
+    if ((entry.formats ?? []).length > 0) continue;
+    const image = pickSourceImage(entry);
+    if (!image || seen.has(image.url)) continue;
+    seen.add(image.url);
+    slides.push(image);
+  }
+  return slides;
+}
+
+/**
+ * The largest thumbnail that is plausibly the source image.
+ *
+ * Two shapes arrive here in practice. Some sources publish sizes, and then the
+ * largest area wins. Instagram very often publishes the same picture fourteen
+ * times with no dimensions at all — on the post that prompted this feature,
+ * every entry was `None x None` — so falling back to yt-dlp's own chosen
+ * `thumbnail` is correct there: it is the extraction the extractor itself
+ * considers representative.
+ */
+function pickSourceImage(info: RawInfo): MediaImage | undefined {
+  const thumbs = (info.thumbnails ?? []).filter(
+    (t): t is { url: string; width?: number; height?: number } => typeof t.url === "string",
+  );
+  const sized = thumbs.filter(
+    (t): t is { url: string; width: number; height: number } =>
+      typeof t.width === "number" && typeof t.height === "number",
+  );
+
+  let url = "";
+  let width: number | undefined;
+  let height: number | undefined;
+
+  if (sized.length > 0) {
+    let best = { url: "", width: 0, height: 0 };
+    for (const t of sized) {
+      if (t.width * t.height > best.width * best.height) best = t;
+    }
+    if (best.width < 600) return undefined;
+    url = best.url;
+    width = best.width;
+    height = best.height;
+  } else if (info.thumbnail) {
+    url = info.thumbnail;
+  } else if (thumbs.length > 0) {
+    url = (thumbs[thumbs.length - 1] as { url: string }).url;
+  }
+
+  if (!url) return undefined;
+  const path = (url.split("?")[0] ?? "").toLowerCase();
+  const container: MediaImage["container"] = path.endsWith(".png")
+    ? "png"
+    : path.endsWith(".webp")
+      ? "webp"
+      : "jpg";
+  return width && height ? { url, width, height, container } : { url, container };
 }
 
 /** The shape we care about from yt-dlp's JSON. Extra fields are ignored. */
@@ -206,6 +328,15 @@ type RawInfo = YtDlpInfo & {
    */
   description?: string;
   thumbnail?: string;
+  /**
+   * Every size the source publishes. Only consulted when the post has no video
+   * track, where the largest entry is the image the visitor actually wants.
+   */
+  thumbnails?: readonly {
+    readonly url?: string;
+    readonly width?: number;
+    readonly height?: number;
+  }[];
   extractor_key?: string;
   extractor?: string;
   is_live?: boolean;

@@ -15,6 +15,12 @@ export const DOWNLOAD_LIMITS = {
   maxFileBytes: 1024 * 1024 * 1024,
   /** A playlist listing beyond this is refused with guidance. */
   maxPlaylistEntries: 50,
+  /**
+   * How many slides of an image carousel are read. Instagram caps a carousel at
+   * 20; the bound exists so a hostile or broken source cannot turn one resolve
+   * into an unbounded walk.
+   */
+  maxCarouselSlides: 20,
   /** Metadata extraction budget. */
   resolveTimeoutMs: 60_000,
   /** How long a finished file is kept before the sweeper deletes it. */

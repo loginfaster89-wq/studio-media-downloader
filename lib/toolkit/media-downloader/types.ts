@@ -32,6 +32,19 @@ export type QualityOption = {
   readonly filesizeUnknown?: boolean;
 };
 
+/** A still image published by the source, when the post has no video track. */
+export type MediaImage = {
+  /** Direct CDN URL. Signed and short-lived, so it is handed out, never stored. */
+  readonly url: string;
+  /**
+   * Pixel size, when the source reports it. Instagram frequently lists its
+   * thumbnails without dimensions, so these are optional rather than invented.
+   */
+  readonly width?: number;
+  readonly height?: number;
+  readonly container: "jpg" | "png" | "webp";
+};
+
 /** Normalised metadata for a single media item. */
 export type MediaMeta = {
   readonly id: string;
@@ -49,6 +62,18 @@ export type MediaMeta = {
   readonly isPlaylist: boolean;
   /** Populated only when isPlaylist is true. */
   readonly entries?: readonly MediaEntry[];
+  /**
+   * Set when the post carries a still image instead of a video — an Instagram
+   * photo post, for example. `qualities` is empty in that case and the client
+   * offers the image itself rather than a resolution picker.
+   */
+  readonly image?: MediaImage;
+  /**
+   * Every slide of an image carousel, in the order the post shows them. Present
+   * only when the post is a multi-image post; `image` then repeats the first
+   * slide so a client that knows nothing about carousels still shows something.
+   */
+  readonly images?: readonly MediaImage[];
 };
 
 /** One row of a playlist listing. Kept light — no per-entry extraction. */
