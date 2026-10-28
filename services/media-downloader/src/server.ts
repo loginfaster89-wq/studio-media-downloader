@@ -20,7 +20,7 @@
  * against another session.
  */
 
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
@@ -325,7 +325,7 @@ async function route(
       });
     }
 
-    await handleImage(target, url.searchParams.get("n"), response);
+    await handleImage(target, url.searchParams.get("n"), response, config.cookiesFile);
     return;
   }
 
@@ -379,20 +379,60 @@ const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
 /**
+ * Build a Cookie header for `host` from the Netscape jar yt-dlp uses.
+ *
+ * Instagram's CDN refuses a bare datacenter fetch (403) even for a signed URL;
+ * sending the same session cookies is what makes the picture load, exactly as it
+ * does for the video downloads. Missing or unreadable jar degrades to no header
+ * rather than failing the request — some sources do not need it.
+ */
+function cookieHeaderFor(jarPath: string | null, host: string): string | null {
+  if (!jarPath) return null;
+  try {
+    const pairs: string[] = [];
+    for (const line of readFileSync(jarPath, "utf8").split("\n")) {
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.split("\t");
+      if (parts.length < 7) continue;
+      const domain = (parts[0] ?? "").replace(/^\./, "").toLowerCase();
+      const name = parts[5];
+      const value = parts[6];
+      if (!domain || !name) continue;
+      if (host === domain || host.endsWith(`.${domain}`)) pairs.push(`${name}=${value}`);
+    }
+    return pairs.length > 0 ? pairs.join("; ") : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch one signed CDN image and hand it back whole.
  *
  * Read into a buffer rather than piped: these are single photos, and the rest of
  * this file already reads files that way — one code path is easier to reason
  * about than two.
  */
-async function handleImage(target: URL, requestedName: string | null, response: ServerResponse): Promise<void> {
+async function handleImage(
+  target: URL,
+  requestedName: string | null,
+  response: ServerResponse,
+  cookiesPath: string | null,
+): Promise<void> {
   try {
+    /*
+     * Send the same session yt-dlp uses. A bare fetch is refused with 403 by
+     * Instagram's CDN even though the URL is signed; the jar is what makes the
+     * difference — it is the same mechanism that lets the video downloads work.
+     */
+    const cookie = cookieHeaderFor(cookiesPath, target.hostname);
     const upstream = await fetch(target, {
       redirect: "follow",
       headers: {
         accept: "image/avif,image/webp,image/*,*/*;q=0.8",
         "user-agent": BROWSER_UA,
         referer: "https://www.instagram.com/",
+        ...(cookie ? { cookie } : {}),
       },
     });
     if (!upstream.ok) {
